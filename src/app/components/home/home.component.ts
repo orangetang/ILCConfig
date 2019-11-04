@@ -1,4 +1,5 @@
 import {Component, OnInit} from '@angular/core';
+import {throwError} from 'rxjs';
 import {ILCCongig} from '../../model/ILCConfig.model';
 import {PairwiseModel} from '../../model/pairwise.model';
 import {CriteriaModel} from '../../model/criteria.model';
@@ -12,19 +13,6 @@ import {HistoryCriteriaModel} from '../../model/historyCriteria.model';
 import {parse} from 'papaparse';
 import {WrongFileAlertComponent} from '../wrong-file-alert/wrong-file-alert.component';
 import {MatDialog} from '@angular/material/dialog';
-
-
-// tslint:disable-next-line:class-name
-interface point {
-  referenceName: string;
-  volttronPointName: string;
-}
-
-// tslint:disable-next-line:class-name
-interface device {
-  deviceTopic: string;
-  devicePoints: point[];
-}
 
 @Component({
   selector: 'app-home',
@@ -110,48 +98,59 @@ export class HomeComponent implements OnInit {
     const reader = new FileReader();
     // tslint:disable-next-line:only-arrow-functions no-shadowed-variable
     reader.onload = () => {
+    try {
+      let json = (JSON.parse(reader.result.toString()));
 
-      let masterDriverConfig;
-      try {
-        masterDriverConfig = JSON.parse(reader.result.toString());
-      } catch (e) {
-        this.openDialog();
-      }
-      // tslint:disable-next-line:variable-name
-      const device_names = Object.keys(masterDriverConfig).filter(key => !(key.endsWith('.csv')));
-      // tslint:disable-next-line:no-shadowed-variable
-      const devices = device_names.map(device => {
-        // const deviceData = JSON.parse(parse(masterDriverConfig[device].data).data.join('\n'));
+      let masterDriverAgentConfig = JSON.parse(json.config.data);
 
-        let deviceData;
-        try {
-          deviceData = JSON.parse(parse(masterDriverConfig[device].data).data.join('\n'));
-        } catch (e) {
-          this.openDialog();
+      if (masterDriverAgentConfig){
+        if (masterDriverAgentConfig.agentid) {
+          this.ilc.agentId = masterDriverAgentConfig.agentid;
         }
-
-        if (deviceData.registry_config) {
-          const registryConfigName = deviceData.registry_config.split('//')[1];
-          const registryConfigData = parse(masterDriverConfig[registryConfigName].data).data;
-          const registryConfigEntries = registryConfigData.slice(1).map(line => {
-            if (line[0] && line[1]) {
-              return {
-                referenceName: line[0],
-                volttronPointName: line[1]
-              } as point;
+      }
+      if (masterDriverAgentConfig){
+        delete json.config;
+      }
+      if (!masterDriverAgentConfig || !this.ilc.agentId){
+        throwError("Provided master driver config is improperly formatted.")
+      }
+    
+      let deviceTopics = Object.keys(json).filter(key => key.startsWith("devices"));
+      let masterDevices: any[] = deviceTopics.map(topic => {
+        let deviceMetadata = topic.split("/");
+        if (deviceMetadata && deviceMetadata.length === 4 && deviceMetadata[0] === "devices"){
+          let campus = deviceMetadata[1], building = deviceMetadata[2], deviceId= deviceMetadata[3];
+          if (this.ilc.campusList.indexOf(campus) < 0){
+            this.ilc.campusList.push(campus);
+          }
+          if (this.ilc.buildingList.indexOf(building) < 0){
+            this.ilc.buildingList.push(building);
+          }
+          let deviceData = JSON.parse(json[topic].data);
+          let registryConfigName = deviceData.registry_config.split('//')[1];
+          let registryConfig = json[registryConfigName].data;
+          let devicePoints = registryConfig.split("\n").slice(1, registryConfig.length).map(registryEntry => {
+            if (registryEntry){
+              let line = registryEntry.split(",");
+              return {"referencePointName": line[0], "volttronPointName": line[1]}
             }
-          });
-          return {
-            deviceTopic: device,
-            devicePoints: registryConfigEntries
-          } as device;
+          }).filter(point => point);
+          return {"deviceTopic": deviceId, "devicePoints": devicePoints};
+        } else {
+          throwError("Device topic " + topic + " is invalid, expected 'devices/<campus>/<building>/<deviceID>'");
         }
       });
-      this.showAlert = false;
-      this.ilc.setMasterDriver(devices);
-      this.openIlcConfig();
-      return devices;
-    };
+      this.ilc.devicesMasterList = masterDevices;
+      this.ilc.deviceAndPoint = masterDevices.map(device => {
+        
+        return {"deviceName": device.deviceTopic, "devicePoints": device["devicePoints"].map(point => point["volttronPointName"]), "checked": false};
+      })
+    } catch (e) {
+      this.openDialog();
+    }
+    this.showAlert = false;
+    this.openIlcConfig();
+    }
     if (e.target.files !== undefined) {
       reader.readAsText(e.target.files[0]);
     }
